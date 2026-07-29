@@ -1,0 +1,17 @@
+{
+  "name": "whiteboard",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "web",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run build -w web",
+    "typecheck": "npm run typecheck -w web && npm run typecheck -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

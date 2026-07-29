@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Whiteboard</title>
+  </head>
+  <body>
+    <header id="toolbar">
+      <span id="brand">Whiteboard</span>
+      <select id="cameraSelect" title="Camera"></select>
+      <button id="redetectBtn" title="Unlock and re-detect the sheet of paper">Re-detect board</button>
+      <button id="rotateBtn" title="Rotate the board 90 degrees">Rotate</button>
+      <button id="beautifyBtn">Beautify now</button>
+      <label id="autoLabel"><input type="checkbox" id="autoToggle" checked /> Auto</label>
+      <button id="presentBtn" title="Full-screen the live board">Present</button>
+      <span class="spacer"></span>
+      <span id="boardChip" class="chip">looking for board&hellip;</span>
+      <span id="agentChip" class="chip">agent: checking&hellip;</span>
+    </header>
+
+    <main id="panes">
+      <section class="pane" id="livePane">
+        <div class="pane-title">Live board</div>
+        <div class="board-frame" id="liveFrame">
+          <canvas id="liveCanvas"></canvas>
+          <canvas id="previewCanvas" title="Camera view with detected board outline"></canvas>
+          <div id="liveHint" hidden></div>
+        </div>
+      </section>
+      <section class="pane" id="aiPane">
+        <div class="pane-title">AI whiteboard <span id="aiStatus"></span></div>
+        <div class="board-frame" id="svgHost">
+          <div id="aiPlaceholder">Waiting for the first beautify pass&hellip;</div>
+        </div>
+      </section>
+    </main>
+
+    <video id="video" playsinline muted hidden></video>
+    <canvas id="captureCanvas" hidden></canvas>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
