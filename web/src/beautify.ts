@@ -21,11 +21,12 @@ export async function requestReset(): Promise<void> {
   await fetch("/api/reset", { method: "POST" });
 }
 
-export async function requestBeautify(imageDataUrl: string): Promise<BeautifyResponse> {
+export async function requestBeautify(imageDataUrl: string, signal?: AbortSignal): Promise<BeautifyResponse> {
   const res = await fetch("/api/beautify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image: imageDataUrl }),
+    signal,
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `beautify failed (${res.status})`);

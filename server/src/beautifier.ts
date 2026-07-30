@@ -14,11 +14,11 @@ const RULES = `You convert a camera snapshot of a hand-drawn paper "whiteboard" 
 For every snapshot, follow this exact workflow:
 1. Transcribe ALL handwritten text as plain text, one line per line of writing. Read letter by letter; do not substitute a word that merely fits the context. Spell out every label, including vertical, rotated, or boxed ones. Read the attached image directly in a single pass: the snapshot is already high-resolution and pre-cleaned, so do NOT run scripts, crop, rotate, or upscale it first - that costs minutes and does not improve accuracy.
 2. Write a compact rendering spec: every text element with its exact spelling and position, every shape, curve, arrow, table, stick figure and doodle, what connects to what, ink colors, white background.
-3. Render the spec with your image generation tool: clean typed sans-serif lettering, smooth vector-like strokes, consistent line weight, dark ink on pure white, in the style of a polished Excalidraw diagram. Explicitly set the image generation tool's aspect_ratio parameter to "4:3" (the paper is US Letter landscape, 1.29:1; the tool otherwise defaults to 3:2 which squeezes the layout). Pass the snapshot file as a reference image so the layout matches. Every word in the image must be spelled exactly as in your transcription.
+3. Render the spec with your image generation tool: clean typed sans-serif lettering, smooth vector-like strokes, consistent line weight, dark ink on pure white, in the style of a polished Excalidraw diagram. Explicitly set the image generation tool's aspect_ratio parameter to "4:3" (the paper is US Letter landscape, 1.29:1; the tool otherwise defaults to 3:2 which squeezes the layout). Pass the snapshot file as a reference image so the layout matches. Every word in the image must be spelled exactly as in your transcription. Call the image generation tool exactly ONCE: do not inspect, review, or regenerate the result - each render costs ~50 seconds and the first one is final.
 
 Rules:
 - Preserve the author's wording, spatial layout, relative sizes, and pen colors. Do not invent content that is not on the board.
-- Save the generated image to the exact output path given in the message.
+- Save the generated image to the exact output path given in the message. Once it is saved, reply with exactly DONE - no review, no summary; the file is picked up automatically the moment you finish.
 - If the snapshot is not a written page at all (an object covering the board, a wrong camera view, a blur), do NOT generate anything; reply with exactly SKIP.`;
 
 export interface BeautifyResult {
@@ -28,22 +28,18 @@ export interface BeautifyResult {
 }
 
 export class Beautifier {
-  private agentPromise: Promise<SDKAgent> | null = null;
   private modelId: string | null = null;
-  private firstPass = true;
   private passCounter = 0;
   private lastPng: string | null = null;
   private chain: Promise<unknown> = Promise.resolve();
+  private latestRequest = 0;
+  private cancelCurrent: (() => void) | null = null;
   public lastError: string | null = null;
 
   constructor(private apiKey: string) {}
 
   get model(): string | null {
     return this.modelId;
-  }
-
-  get ready(): boolean {
-    return this.agentPromise !== null;
   }
 
   async pickModel(): Promise<string> {
@@ -73,35 +69,35 @@ export class Beautifier {
     return this.modelId;
   }
 
-  private async getAgent(): Promise<SDKAgent> {
-    if (!this.agentPromise) {
-      this.agentPromise = (async () => {
-        await fs.mkdir(WORK_DIR, { recursive: true });
-        const model = await this.pickModel();
-        return Agent.create({
-          apiKey: this.apiKey,
-          model: { id: model },
-          name: "Whiteboard beautifier",
-          local: { cwd: WORK_DIR },
-        });
-      })();
-      this.agentPromise.catch(() => {
-        this.agentPromise = null;
-        this.firstPass = true;
-      });
-    }
-    return this.agentPromise;
+  // One agent per pass, thrown away afterwards. A persistent agent saved the
+  // ~2s creation cost but its growing conversation history made every later
+  // pass slower and tool-happier (118s to reach image generation vs 32s on a
+  // fresh agent, measured 2026-07-30).
+  private async createAgent(): Promise<SDKAgent> {
+    await fs.mkdir(WORK_DIR, { recursive: true });
+    const model = await this.pickModel();
+    return Agent.create({
+      apiKey: this.apiKey,
+      model: { id: model },
+      name: "Whiteboard beautifier",
+      local: { cwd: WORK_DIR },
+    });
   }
 
   /**
-   * Serialized: the persistent agent can only process one run at a time.
-   * `isAbandoned` is checked when the queued run's turn comes: a page reload
-   * kills the fetch but not the queued work, and each orphaned pass would
-   * otherwise hold the agent for minutes.
+   * Serialized with a newest-wins policy. Only one run executes at a time,
+   * and a new request cancels the in-flight run rather than queueing behind
+   * it: the client only sends a new snapshot when the running pass's input is
+   * already stale, and client-side fetch aborts are not guaranteed to reach
+   * us through the dev proxy, so a zombie run could otherwise hold the agent
+   * for minutes.
    */
   beautify(pngBase64: string, isAbandoned?: () => boolean): Promise<BeautifyResult> {
+    const requestId = ++this.latestRequest;
+    this.cancelCurrent?.();
     const task = () => {
       if (isAbandoned?.()) throw new Error("request abandoned before its turn");
+      if (requestId !== this.latestRequest) throw new Error("superseded by a newer request");
       return this.runOnce(pngBase64, isAbandoned);
     };
     const result = this.chain.then(task, task);
@@ -115,17 +111,21 @@ export class Beautifier {
     const snapshotPath = path.join(WORK_DIR, `snapshot-${passId}.png`);
     const outputName = `board-${passId}.png`;
     const outputPath = path.join(WORK_DIR, outputName);
+    let agent: SDKAgent | null = null;
     try {
-      const agent = await this.getAgent();
+      agent = await this.createAgent();
       await fs.writeFile(snapshotPath, Buffer.from(pngBase64, "base64"));
 
-      const preamble = this.firstPass ? `${RULES}\n\n` : "The board has changed; process the fresh snapshot with the same workflow and rules. ";
-      const prompt = `${preamble}The snapshot is attached and also saved at ${snapshotPath} (use that path as the image tool's reference image). Save the generated whiteboard image to exactly ${outputPath}`;
+      const prompt = `${RULES}\n\nThe snapshot is attached and also saved at ${snapshotPath} (use that path as the image tool's reference image). Save the generated whiteboard image to exactly ${outputPath}`;
 
       const run = await agent.send({
         text: prompt,
         images: [{ data: pngBase64, mimeType: "image/png" }],
       });
+      this.cancelCurrent = () => {
+        console.log(`[pass ${passId}] cancelled: superseded by a newer request`);
+        run.cancel().catch(() => {});
+      };
 
       const timeout = setTimeout(() => {
         run.cancel().catch(() => {});
@@ -139,12 +139,27 @@ export class Beautifier {
         : null;
 
       let text = "";
+      // Stage log: one line per event, so "refreshing…" is attributable to
+      // transcription (text), the image tool, or dead air.
+      const t = () => ((Date.now() - started) / 1000).toFixed(1).padStart(6);
+      console.log(`[pass ${passId}] ${t()}s send at ${new Date().toLocaleTimeString()}`);
       try {
         for await (const event of run.stream()) {
           if (event.type === "assistant") {
+            let chars = 0;
             for (const block of event.message.content) {
-              if (block.type === "text") text += block.text;
+              if (block.type === "text") {
+                text += block.text;
+                chars += block.text.length;
+              } else {
+                console.log(`[pass ${passId}] ${t()}s assistant block: ${block.type}`);
+              }
             }
+            if (chars) console.log(`[pass ${passId}] ${t()}s text +${chars} chars`);
+          } else if (event.type === "tool_call") {
+            console.log(`[pass ${passId}] ${t()}s tool ${event.name} ${event.status}`);
+          } else if (event.type !== "thinking") {
+            console.log(`[pass ${passId}] ${t()}s event: ${event.type}`);
           }
         }
         const result = await run.wait();
@@ -155,6 +170,7 @@ export class Beautifier {
         }
         if (!text && result.result) text = result.result;
       } finally {
+        this.cancelCurrent = null;
         clearTimeout(timeout);
         if (abandonPoll) clearInterval(abandonPoll);
       }
@@ -164,17 +180,14 @@ export class Beautifier {
       }
 
       const png = await this.readGeneratedImage(outputPath, outputName);
-      this.firstPass = false;
       this.lastError = null;
       this.lastPng = png;
       return { png, durationMs: Date.now() - started };
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
-      // A failed run can leave the persistent conversation in a state where
-      // every follow-up also fails; start over with a fresh agent next time.
-      await this.reset();
       throw err;
     } finally {
+      if (agent) void agent[Symbol.asyncDispose]().catch(() => {});
       await fs.rm(snapshotPath, { force: true });
       await fs.rm(outputPath, { force: true });
     }
@@ -198,31 +211,16 @@ export class Beautifier {
     throw new Error("agent finished but produced no image file");
   }
 
+  /**
+   * New board session. Agents are per-pass now, so the only cross-pass state
+   * is the cached image that SKIP falls back to; a new page must not inherit
+   * the previous page's render.
+   */
   async reset(): Promise<void> {
-    const stale = this.agentPromise;
-    this.agentPromise = null;
-    this.firstPass = true;
     this.lastPng = null;
-    if (stale) {
-      try {
-        const agent = await stale;
-        await agent[Symbol.asyncDispose]();
-      } catch {
-        // agent may have never been created
-      }
-    }
   }
 
   async dispose(): Promise<void> {
-    const promise = this.agentPromise;
-    this.agentPromise = null;
-    if (promise) {
-      try {
-        const agent = await promise;
-        await agent[Symbol.asyncDispose]();
-      } catch {
-        // best-effort cleanup on shutdown
-      }
-    }
+    // Per-pass agents are disposed by runOnce; nothing persistent to tear down.
   }
 }

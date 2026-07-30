@@ -61,6 +61,8 @@ const motion = new MotionDetector();
 
 let frameCount = 0;
 let wasLocked = false;
+let everLocked = false;
+let lastLockedQuad: NonNullable<typeof quadLock.locked> | null = null;
 let driftStrikes = 0;
 let rotationSteps = Number(localStorage.getItem("wb-rotation") ?? "0") % 4;
 let lastMotionRatio = 0;
@@ -69,6 +71,7 @@ let lastMotionAt = 0;
 let lastBeautifyAt = 0;
 let inFlight = false;
 let queued = false;
+let currentAbort: AbortController | null = null;
 let agentUsable = false;
 let lastSentBoard: ImageData | null = null;
 
@@ -141,16 +144,20 @@ function tick(): void {
     if (quadLock.locked) {
       if (!wasLocked) {
         // A fresh lock is a fresh board: arm an auto pass and start a clean
-        // AI session so the previous page can't leak into this one.
+        // AI session so the previous page can't leak into this one. Keep the
+        // previous AI image on screen, though - a mid-demo relock (hand over
+        // the paper, camera bump) must not blank the pane for the minutes the
+        // next pass takes.
         wasLocked = true;
+        everLocked = true;
         dirty = true;
         lastMotionAt = performance.now();
         driftStrikes = 0;
         lastSentBoard = null;
-        svgHost.innerHTML = '<div id="aiPlaceholder">Waiting for the first beautify pass&hellip;</div>';
         void requestReset();
       }
       liveHint.hidden = true;
+      lastLockedQuad = quadLock.locked;
       const calm = lastMotionRatio <= MOTION_THRESHOLD;
       if (calm && frameCount % DRIFT_CHECK_EVERY_N_FRAMES === 0) {
         checkDrift(src);
@@ -178,6 +185,15 @@ function tick(): void {
         lastMotionAt = 0;
         lastBeautifyAt = 0;
       };
+    } else if (everLocked && lastLockedQuad) {
+      // Lock lost mid-session (hand over the page, camera bump): the paper is
+      // almost always still where it was, so keep warping live frames through
+      // the last known quad rather than pausing. Anchors stay frozen - the
+      // obstruction that broke detection would poison the contrast stretch.
+      warpAndClean(cv, src, rotateQuad(lastLockedQuad, rotationSteps), liveCanvas, false);
+      liveHint.hidden = false;
+      liveHint.textContent = "Re-detecting the paper \u2014 showing last known alignment";
+      wasLocked = false;
     } else {
       liveHint.hidden = false;
       liveHint.textContent = "Looking for the sheet of paper \u2014 make sure all four corners are in view";
@@ -248,9 +264,24 @@ function updateBoardChip(): void {
 }
 
 function maybeAutoBeautify(): void {
-  if (!autoToggle.checked || !agentUsable || !dirty || inFlight) return;
+  if (!autoToggle.checked || !agentUsable || !dirty) return;
   const now = performance.now();
   if (now - lastMotionAt < MOTION_DEBOUNCE_MS) return;
+  if (inFlight) {
+    if (lastSentBoard === null) return;
+    // The running pass snapshotted the board before this ink landed, so its
+    // result is already stale. Cancel it and resend the current board instead
+    // of waiting minutes for an obsolete image plus a full second pass.
+    const sample = sampleBoard(liveCanvas);
+    if (inkChangeRatio(sample, lastSentBoard) >= CHANGE_MIN_RATIO) {
+      queued = true;
+      currentAbort?.abort();
+    }
+    // Verdict reached either way; don't re-sample every frame for the rest of
+    // the pass. New ink re-arms via the motion path.
+    dirty = false;
+    return;
+  }
   if (now - lastBeautifyAt < MIN_BEAUTIFY_GAP_MS) return;
   const sample = sampleBoard(liveCanvas);
   const gateRatio = lastSentBoard === null ? null : inkChangeRatio(sample, lastSentBoard);
@@ -276,9 +307,10 @@ async function triggerBeautify(): Promise<void> {
   beautifyBtn.disabled = true;
   aiStatus.textContent = "refreshing\u2026";
   aiStatus.className = "busy";
+  currentAbort = new AbortController();
   try {
     lastSentBoard = sampleBoard(liveCanvas);
-    const result = await requestBeautify(snapshotDataUrl());
+    const result = await requestBeautify(snapshotDataUrl(), currentAbort.signal);
     const img = new Image();
     img.src = result.image;
     img.alt = "AI whiteboard";
@@ -289,10 +321,16 @@ async function triggerBeautify(): Promise<void> {
     // A failed pass delivered nothing: forget the "sent" sample so the
     // change gate can't conclude "no changes" over a stale or empty pane.
     lastSentBoard = null;
-    aiStatus.textContent = `error: ${err instanceof Error ? err.message : err}`;
-    aiStatus.className = "";
-    console.error("[beautify]", err);
+    if (err instanceof DOMException && err.name === "AbortError") {
+      aiStatus.textContent = "superseded \u2014 restarting\u2026";
+      aiStatus.className = "busy";
+    } else {
+      aiStatus.textContent = `error: ${err instanceof Error ? err.message : err}`;
+      aiStatus.className = "";
+      console.error("[beautify]", err);
+    }
   } finally {
+    currentAbort = null;
     inFlight = false;
     beautifyBtn.disabled = false;
     lastBeautifyAt = performance.now();
@@ -371,6 +409,11 @@ cameraSelect.addEventListener("change", async () => {
   try {
     await openCamera(video, cameraSelect.value);
     quadLock.release();
+    // A new camera is a new aiming session: show the raw feed again while
+    // the user positions it. The old camera's quad is meaningless geometry
+    // in the new camera's frame.
+    everLocked = false;
+    lastLockedQuad = null;
     motion.reset();
     updateBoardChip();
   } catch (err) {

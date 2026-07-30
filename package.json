@@ -7,6 +7,7 @@
     "server"
   ],
   "scripts": {
+    "predev": "bash scripts/camera-tune.sh --auto || true",
     "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w server\" \"npm run dev -w web\"",
     "build": "npm run build -w web",
     "typecheck": "npm run typecheck -w web && npm run typecheck -w server"

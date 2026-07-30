@@ -22,8 +22,8 @@ app.get("/api/status", async (_req, res) => {
   res.json({ hasKey: true, model, lastError: beautifier.lastError });
 });
 
-// Fresh board session: dispose the agent so old page content can't leak
-// into the next page's render via conversation history.
+// Fresh board session: drop the cached render so a new page's SKIP fallback
+// can't serve the previous page's board.
 app.post("/api/reset", async (_req, res) => {
   await beautifier?.reset();
   res.json({ ok: true });
@@ -40,9 +40,14 @@ app.post("/api/beautify", async (req, res) => {
     return;
   }
   const base64 = image.replace(/^data:image\/\w+;base64,/, "");
+  const stamp = () => new Date().toLocaleTimeString();
+  console.log(`[beautify] ${stamp()} request received`);
   let gone = false;
   res.on("close", () => {
-    if (!res.writableEnded) gone = true;
+    if (!res.writableEnded) {
+      gone = true;
+      console.log(`[beautify] ${stamp()} client disconnected before delivery`);
+    }
   });
   try {
     const result = await beautifier.beautify(base64, () => gone);
@@ -51,9 +56,10 @@ app.post("/api/beautify", async (req, res) => {
       durationMs: result.durationMs,
       model: beautifier.model,
     });
+    console.log(`[beautify] ${stamp()} delivered (${(result.durationMs / 1000).toFixed(1)}s)${gone ? " to disconnected client" : ""}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[beautify] failed:", message);
+    console.error(`[beautify] ${stamp()} failed:`, message);
     res.status(500).json({ error: message });
   }
 });
