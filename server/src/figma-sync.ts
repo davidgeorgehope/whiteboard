@@ -1,9 +1,9 @@
 import path from "node:path";
-import { Agent, type SDKAgent } from "@cursor/sdk";
+import { Agent, Cursor, type SDKAgent } from "@cursor/sdk";
 
 // Generous: a full board redraw is read + transcription + several use_figma
-// calls, and opus regularly thinks for minutes between calls. The sync is
-// fire-and-forget so latency only delays the mirror, never the UI.
+// calls with thinking in between. The sync never blocks the UI, so latency
+// only delays the mirror - but a cancelled run leaves a half-drawn board.
 const RUN_TIMEOUT_MS = 600_000;
 
 // Figma's remote MCP rejects PATs and only accepts OAuth from approved clients,
@@ -31,31 +31,60 @@ export type FigmaSyncState = "idle" | "syncing" | "error";
 
 /**
  * Mirrors the paper board onto a FigJam board through Figma's official remote
- * MCP server. One sync runs at a time with the same newest-wins policy as the
- * beautifier: a fresh board state cancels an in-flight sync, because drawing
- * an outdated board wastes minutes and the next sync redraws everything anyway.
+ * MCP server. One sync runs at a time with a newest-wins policy: a fresh board
+ * state cancels an in-flight sync, because drawing an outdated board wastes
+ * minutes and the next sync redraws everything anyway.
  */
 export class FigmaSync {
   private chain: Promise<unknown> = Promise.resolve();
   private latestRequest = 0;
   private cancelCurrent: (() => void) | null = null;
   private passCounter = 0;
+  private modelId: string | null = null;
   public state: FigmaSyncState = "idle";
   public lastError: string | null = null;
 
   constructor(
     private apiKey: string,
     private boardUrl: string,
-    private pickModel: () => Promise<string>,
   ) {}
 
+  get model(): string | null {
+    return this.modelId;
+  }
+
+  async pickModel(): Promise<string> {
+    if (this.modelId) return this.modelId;
+    if (process.env.CURSOR_MODEL) {
+      this.modelId = process.env.CURSOR_MODEL;
+      return this.modelId;
+    }
+    try {
+      const models = await Cursor.models.list({ apiKey: this.apiKey });
+      const ids = models.map((m) => m.id);
+      // The drawer needs vision (it transcribes the snapshot itself) but the
+      // mirror is only useful if it lands quickly: opus-4-8 reads handwriting
+      // best but thinks for minutes between tool calls; sonnet reads well
+      // enough and moves much faster.
+      const preferred =
+        ids.find((id) => /sonnet/i.test(id)) ??
+        ids.find((id) => /opus-4-8/i.test(id)) ??
+        ids.find((id) => /fable/i.test(id)) ??
+        ids.find((id) => /gpt/i.test(id));
+      this.modelId = preferred ?? "auto";
+    } catch {
+      this.modelId = "auto";
+    }
+    return this.modelId;
+  }
+
   /** Fire-and-forget: errors land in `state`/`lastError`, never on the caller. */
-  sync(spec: string, pngBase64: string): void {
+  sync(pngBase64: string): void {
     const requestId = ++this.latestRequest;
     this.cancelCurrent?.();
     const task = async () => {
       if (requestId !== this.latestRequest) return;
-      await this.runOnce(spec, pngBase64);
+      await this.runOnce(pngBase64);
     };
     this.chain = this.chain.then(task, task).then(
       () => {
@@ -74,19 +103,11 @@ export class FigmaSync {
     );
   }
 
-  private async runOnce(spec: string, pngBase64: string): Promise<void> {
+  private async runOnce(pngBase64: string): Promise<void> {
     const started = Date.now();
     const passId = ++this.passCounter;
     this.state = "syncing";
     const t = () => ((Date.now() - started) / 1000).toFixed(1).padStart(6);
-
-    // The beautify pass sometimes emits its transcription inside thinking
-    // blocks, leaving no usable spec text; the drawer then reads the attached
-    // snapshot itself.
-    const content =
-      spec.trim().length >= 80
-        ? `A rendering spec from the transcription pass follows; trust it for spelling:\n\n${spec.trim()}`
-        : `No rendering spec is available for this update. Transcribe the attached snapshot yourself: read letter by letter and do not substitute words that merely fit the context.`;
 
     const prompt = `You mirror a hand-drawn paper whiteboard onto a FigJam board using the "figma" MCP server tools.
 
@@ -95,12 +116,12 @@ Target FigJam board: ${this.boardUrl}
 ${FIGJAM_GUIDE}
 
 Workflow for this update:
-1. Inspect the board with a read-only use_figma script: find the section named "Paper board" and return its children (ids, types, text). If the section does not exist yet, create it in step 2.
-2. Make that section match the CURRENT BOARD CONTENT below: update text on nodes that changed, create what is missing, remove section children that are no longer on the paper. Never touch anything outside the "Paper board" section.
-3. When the section matches, reply with exactly DONE - no summary. If the figma MCP tools are unavailable or fail with an authentication or connection error, reply with FAIL: followed by the exact error text.
+1. Transcribe the attached snapshot of the paper: read letter by letter and do not substitute words that merely fit the context. Ignore hands, pens and anything that is not ink on the page.
+2. Inspect the board with one read-only use_figma script: find the section named "Paper board" and return its children (ids, types, text). If the section does not exist yet, create it in step 3.
+3. Make that section match the paper: update text on nodes that changed, create what is missing, remove section children that are no longer on the paper. Never touch anything outside the "Paper board" section.
+4. When the section matches, reply with exactly DONE - no summary. If the figma MCP tools are unavailable or fail with an authentication or connection error, reply with FAIL: followed by the exact error text.
 
-CURRENT BOARD CONTENT
-The snapshot photo of the paper is attached. ${content}`;
+This is a live mirror and speed matters: plan once, keep thinking brief, batch each use_figma call up to the ~10-operation limit, and do not re-read the board between writes or run a final verification pass.`;
 
     let agent: SDKAgent | null = null;
     try {
@@ -123,7 +144,7 @@ The snapshot photo of the paper is attached. ${content}`;
       const timeout = setTimeout(() => run.cancel().catch(() => {}), RUN_TIMEOUT_MS);
 
       let text = "";
-      console.log(`[figma ${passId}] ${t()}s sync started at ${new Date().toLocaleTimeString()}`);
+      console.log(`[figma ${passId}] ${t()}s sync started at ${new Date().toLocaleTimeString()} (${model})`);
       try {
         for await (const event of run.stream()) {
           if (event.type === "assistant") {

@@ -11,9 +11,8 @@
       <select id="cameraSelect" title="Camera"></select>
       <button id="redetectBtn" title="Unlock and re-detect the sheet of paper">Re-detect board</button>
       <button id="rotateBtn" title="Rotate the board 90 degrees">Rotate</button>
-      <button id="beautifyBtn">Beautify now</button>
+      <button id="syncBtn" title="Send the current board to FigJam">Sync to FigJam</button>
       <label id="autoLabel"><input type="checkbox" id="autoToggle" checked /> Auto</label>
-      <label id="figmaLabel" hidden><input type="checkbox" id="figmaToggle" checked /> FigJam</label>
       <button id="presentBtn" title="Full-screen the live board">Present</button>
       <span class="spacer"></span>
       <span id="boardChip" class="chip">looking for board&hellip;</span>
@@ -23,17 +22,11 @@
 
     <main id="panes">
       <section class="pane" id="livePane">
-        <div class="pane-title">Live board</div>
+        <div class="pane-title">Live board <span id="syncStatus"></span></div>
         <div class="board-frame" id="liveFrame">
           <canvas id="liveCanvas"></canvas>
           <canvas id="previewCanvas" title="Camera view with detected board outline"></canvas>
           <div id="liveHint" hidden></div>
-        </div>
-      </section>
-      <section class="pane" id="aiPane">
-        <div class="pane-title">AI whiteboard <span id="aiStatus"></span></div>
-        <div class="board-frame" id="svgHost">
-          <div id="aiPlaceholder">Waiting for the first beautify pass&hellip;</div>
         </div>
       </section>
     </main>

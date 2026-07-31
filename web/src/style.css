@@ -61,14 +61,14 @@ button:hover {
   border-color: var(--accent);
 }
 
-#beautifyBtn {
+#syncBtn {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
   font-weight: 600;
 }
 
-#beautifyBtn:disabled {
+#syncBtn:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -105,18 +105,10 @@ button:hover {
 #panes {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
   padding: 12px;
   min-height: 0;
-}
-
-#panes.ai-hidden {
-  grid-template-columns: 1fr;
-}
-
-#panes.ai-hidden #aiPane {
-  display: none;
 }
 
 .pane {
@@ -142,12 +134,12 @@ button:hover {
   gap: 8px;
 }
 
-#aiStatus {
+#syncStatus {
   text-transform: none;
   letter-spacing: normal;
 }
 
-#aiStatus.busy {
+#syncStatus.busy {
   color: var(--accent);
 }
 
@@ -214,22 +206,4 @@ button:hover {
   border-radius: 999px;
   font-size: 12px;
   pointer-events: none;
-}
-
-#svgHost {
-  overflow: auto;
-  background: #fff;
-}
-
-#svgHost svg,
-#svgHost img {
-  max-width: 100%;
-  height: auto;
-  display: block;
-  margin: auto;
-}
-
-#aiPlaceholder {
-  color: #999;
-  font-size: 13px;
 }

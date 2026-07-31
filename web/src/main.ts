@@ -11,27 +11,29 @@ import {
   inkChangeRatio,
   type Quad,
 } from "./pipeline";
-import { fetchStatus, requestBeautify, requestReset, type ServerStatus } from "./beautify";
+import { fetchStatus, requestSync, type ServerStatus } from "./sync";
 
 // Full 1080p capture: faint thin strokes lose too much contrast when the
 // paper is a small part of a downscaled frame.
 const CAPTURE_MAX_WIDTH = 1920;
-// The AI snapshot is re-warped from the full-res frame once per pass, so it
+// The sync snapshot is re-warped from the full-res frame once per pass, so it
 // can afford more pixels than the every-frame live view.
 const SNAPSHOT_WIDTH = 1700;
 const DETECT_EVERY_N_FRAMES = 4;
 // Calibrated against the stretched output: idle sensor flicker measures up to
 // ~0.011, a hand writing in frame 0.1+. Too low and the debounce never
-// elapses, permanently deferring auto-beautify.
+// elapses, permanently deferring auto-sync.
 const MOTION_THRESHOLD = 0.03;
 // Fraction of downsampled board pixels that must flip between ink and paper
-// (inkChangeRatio) since the last AI-sent board before an auto pass fires.
+// (inkChangeRatio) since the last synced board before an auto pass fires.
 // A single short word measures ~0.01; drift-induced edge wobble measures ~0.
 const CHANGE_MIN_RATIO = 0.004;
-// Wait for the pen to be down for a bit before beautifying, so lifting the
+// Wait for the pen to be down for a bit before syncing, so lifting the
 // pen mid-word doesn't fire a pass.
 const MOTION_DEBOUNCE_MS = 1600;
-const MIN_BEAUTIFY_GAP_MS = 4000;
+// Each send cancels the in-flight FigJam draw, so resends must be deliberate:
+// a superseded pass throws away minutes of drawing work.
+const MIN_SYNC_GAP_MS = 8000;
 // While locked, re-run detection in the background on calm frames; this many
 // consecutive disagreements with the locked corners (paper flipped, moved,
 // camera bumped) release the lock so it can re-acquire on its own.
@@ -47,21 +49,13 @@ const liveCanvas = $<HTMLCanvasElement>("liveCanvas");
 const previewCanvas = $<HTMLCanvasElement>("previewCanvas");
 const liveHint = $<HTMLDivElement>("liveHint");
 const liveFrame = $<HTMLDivElement>("liveFrame");
-const svgHost = $<HTMLDivElement>("svgHost");
-const aiStatus = $<HTMLSpanElement>("aiStatus");
+const syncStatus = $<HTMLSpanElement>("syncStatus");
 const boardChip = $<HTMLSpanElement>("boardChip");
 const agentChip = $<HTMLSpanElement>("agentChip");
 const cameraSelect = $<HTMLSelectElement>("cameraSelect");
-const beautifyBtn = $<HTMLButtonElement>("beautifyBtn");
+const syncBtn = $<HTMLButtonElement>("syncBtn");
 const autoToggle = $<HTMLInputElement>("autoToggle");
-const figmaLabel = $<HTMLLabelElement>("figmaLabel");
-const figmaToggle = $<HTMLInputElement>("figmaToggle");
 const figmaChip = $<HTMLSpanElement>("figmaChip");
-
-figmaToggle.checked = localStorage.getItem("wb-figma") !== "off";
-figmaToggle.addEventListener("change", () => {
-  localStorage.setItem("wb-figma", figmaToggle.checked ? "on" : "off");
-});
 
 let cv: CV;
 const quadLock = new QuadLock();
@@ -76,10 +70,7 @@ let rotationSteps = Number(localStorage.getItem("wb-rotation") ?? "0") % 4;
 let lastMotionRatio = 0;
 let dirty = false;
 let lastMotionAt = 0;
-let lastBeautifyAt = 0;
-let inFlight = false;
-let queued = false;
-let currentAbort: AbortController | null = null;
+let lastSyncAt = 0;
 let agentUsable = false;
 let lastSentBoard: ImageData | null = null;
 
@@ -102,9 +93,9 @@ async function init(): Promise<void> {
   boardChip.textContent = "looking for board\u2026";
 
   refreshAgentStatus();
-  // Keep retrying: the server may be mid-restart when the page loads, and a
-  // stale "offline" reading would silently disable auto-beautify.
-  setInterval(refreshAgentStatus, 15_000);
+  // Frequent: the FigJam sync runs server-side for minutes and this poll is
+  // the only way its progress reaches the chip.
+  setInterval(refreshAgentStatus, 5_000);
   requestAnimationFrame(tick);
 }
 
@@ -151,18 +142,14 @@ function tick(): void {
 
     if (quadLock.locked) {
       if (!wasLocked) {
-        // A fresh lock is a fresh board: arm an auto pass and start a clean
-        // AI session so the previous page can't leak into this one. Keep the
-        // previous AI image on screen, though - a mid-demo relock (hand over
-        // the paper, camera bump) must not blank the pane for the minutes the
-        // next pass takes.
+        // A fresh lock is a fresh board: arm an auto pass and forget the
+        // previously synced state so the gate can't suppress the first sync.
         wasLocked = true;
         everLocked = true;
         dirty = true;
         lastMotionAt = performance.now();
         driftStrikes = 0;
         lastSentBoard = null;
-        void requestReset();
       }
       liveHint.hidden = true;
       lastLockedQuad = quadLock.locked;
@@ -177,21 +164,20 @@ function tick(): void {
         dirty = true;
         lastMotionAt = performance.now();
       }
-      maybeAutoBeautify();
+      maybeAutoSync();
       (window as any).__wb = {
         ratio: Number(ratio.toFixed(5)),
         dirty,
         agentUsable,
-        inFlight,
         sinceMotionMs: Math.round(performance.now() - lastMotionAt),
-        sinceBeautifyMs: Math.round(performance.now() - lastBeautifyAt),
+        sinceSyncMs: Math.round(performance.now() - lastSyncAt),
       };
       // Debug hook for CDP-driven verification: simulate "writing stopped a
       // while ago" without physical motion in front of the camera.
       (window as any).__wbArm = () => {
         dirty = true;
         lastMotionAt = 0;
-        lastBeautifyAt = 0;
+        lastSyncAt = 0;
       };
     } else if (everLocked && lastLockedQuad) {
       // Lock lost mid-session (hand over the page, camera bump): the paper is
@@ -271,84 +257,43 @@ function updateBoardChip(): void {
   }
 }
 
-function maybeAutoBeautify(): void {
+function maybeAutoSync(): void {
   if (!autoToggle.checked || !agentUsable || !dirty) return;
   const now = performance.now();
   if (now - lastMotionAt < MOTION_DEBOUNCE_MS) return;
-  if (inFlight) {
-    if (lastSentBoard === null) return;
-    // The running pass snapshotted the board before this ink landed, so its
-    // result is already stale. Cancel it and resend the current board instead
-    // of waiting minutes for an obsolete image plus a full second pass.
-    const sample = sampleBoard(liveCanvas);
-    if (inkChangeRatio(sample, lastSentBoard) >= CHANGE_MIN_RATIO) {
-      queued = true;
-      currentAbort?.abort();
-    }
-    // Verdict reached either way; don't re-sample every frame for the rest of
-    // the pass. New ink re-arms via the motion path.
-    dirty = false;
-    return;
-  }
-  if (now - lastBeautifyAt < MIN_BEAUTIFY_GAP_MS) return;
+  if (now - lastSyncAt < MIN_SYNC_GAP_MS) return;
   const sample = sampleBoard(liveCanvas);
   const gateRatio = lastSentBoard === null ? null : inkChangeRatio(sample, lastSentBoard);
   (window as any).__wbGateRatio = gateRatio;
   if (gateRatio !== null && gateRatio < CHANGE_MIN_RATIO) {
     dirty = false;
-    aiStatus.textContent = "no changes";
-    aiStatus.className = "";
+    syncStatus.textContent = "no changes";
+    syncStatus.className = "";
     return;
   }
-  void triggerBeautify();
+  void triggerSync();
 }
 
-async function triggerBeautify(): Promise<void> {
-  if (inFlight) {
-    queued = true;
-    return;
-  }
+async function triggerSync(): Promise<void> {
   if (!quadLock.locked) return;
-  inFlight = true;
   dirty = false;
-  lastBeautifyAt = performance.now();
-  beautifyBtn.disabled = true;
-  aiStatus.textContent = "refreshing\u2026";
-  aiStatus.className = "busy";
-  currentAbort = new AbortController();
+  lastSyncAt = performance.now();
+  syncStatus.textContent = "sending\u2026";
+  syncStatus.className = "busy";
   try {
     lastSentBoard = sampleBoard(liveCanvas);
-    const result = await requestBeautify(snapshotDataUrl(), currentAbort.signal, figmaToggle.checked);
-    const img = new Image();
-    img.src = result.image;
-    img.alt = "AI whiteboard";
-    svgHost.replaceChildren(img);
-    aiStatus.textContent = `updated in ${(result.durationMs / 1000).toFixed(1)}s`;
-    aiStatus.className = "";
-    // The FigJam sync starts right after a pass; reflect it without waiting
-    // for the 15s status poll.
+    await requestSync(snapshotDataUrl());
+    syncStatus.textContent = "";
+    // The server-side draw starts immediately; reflect it without waiting
+    // for the status poll.
     void refreshAgentStatus();
   } catch (err) {
-    // A failed pass delivered nothing: forget the "sent" sample so the
-    // change gate can't conclude "no changes" over a stale or empty pane.
+    // A failed send delivered nothing: forget the "sent" sample so the
+    // change gate can't conclude "no changes" over a snapshot that never left.
     lastSentBoard = null;
-    if (err instanceof DOMException && err.name === "AbortError") {
-      aiStatus.textContent = "superseded \u2014 restarting\u2026";
-      aiStatus.className = "busy";
-    } else {
-      aiStatus.textContent = `error: ${err instanceof Error ? err.message : err}`;
-      aiStatus.className = "";
-      console.error("[beautify]", err);
-    }
-  } finally {
-    currentAbort = null;
-    inFlight = false;
-    beautifyBtn.disabled = false;
-    lastBeautifyAt = performance.now();
-    if (queued) {
-      queued = false;
-      void triggerBeautify();
-    }
+    syncStatus.textContent = `error: ${err instanceof Error ? err.message : err}`;
+    syncStatus.className = "";
+    console.error("[sync]", err);
   }
 }
 
@@ -382,9 +327,9 @@ async function refreshAgentStatus(): Promise<void> {
     const status = await fetchStatus();
     if (!status.hasKey) {
       agentUsable = false;
-      agentChip.textContent = "agent: no API key";
+      agentChip.textContent = "agent: not configured";
       agentChip.className = "chip bad";
-      agentChip.title = "Copy .env.example to .env and set CURSOR_API_KEY, then restart the server.";
+      agentChip.title = status.lastError ?? "Set CURSOR_API_KEY and FIGMA_BOARD_URL in .env, then restart the server.";
     } else {
       agentUsable = true;
       agentChip.textContent = `agent: ${status.model ?? "ready"}`;
@@ -400,9 +345,7 @@ async function refreshAgentStatus(): Promise<void> {
 }
 
 function updateFigmaChip(figma: ServerStatus["figma"]): void {
-  const configured = figma !== null;
-  figmaLabel.hidden = !configured;
-  figmaChip.hidden = !configured;
+  figmaChip.hidden = figma === null;
   if (!figma) return;
   if (figma.state === "error") {
     figmaChip.textContent = "figma: error";
@@ -421,7 +364,7 @@ $<HTMLButtonElement>("redetectBtn").addEventListener("click", () => {
   updateBoardChip();
 });
 
-beautifyBtn.addEventListener("click", () => void triggerBeautify());
+syncBtn.addEventListener("click", () => void triggerSync());
 
 $<HTMLButtonElement>("rotateBtn").addEventListener("click", () => {
   rotationSteps = (rotationSteps + 1) % 4;
