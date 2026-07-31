@@ -3,6 +3,7 @@ import path from "node:path";
 import { Agent, Cursor, type SDKAgent } from "@cursor/sdk";
 
 const WORK_DIR = path.resolve(import.meta.dirname, "../.board-workspace");
+const ARCHIVE_DIR = path.resolve(import.meta.dirname, "../.board-archive");
 const RUN_TIMEOUT_MS = 300_000;
 
 // Hybrid pipeline: the agent first transcribes the handwriting (a vision LLM
@@ -182,6 +183,7 @@ export class Beautifier {
       const png = await this.readGeneratedImage(outputPath, outputName);
       this.lastError = null;
       this.lastPng = png;
+      void this.archive(png);
       return { png, durationMs: Date.now() - started };
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
@@ -190,6 +192,17 @@ export class Beautifier {
       if (agent) void agent[Symbol.asyncDispose]().catch(() => {});
       await fs.rm(snapshotPath, { force: true });
       await fs.rm(outputPath, { force: true });
+    }
+  }
+
+  /** Every successful render is kept in server/.board-archive, best effort. */
+  private async archive(pngBase64: string): Promise<void> {
+    try {
+      await fs.mkdir(ARCHIVE_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      await fs.writeFile(path.join(ARCHIVE_DIR, `board-${stamp}.png`), Buffer.from(pngBase64, "base64"));
+    } catch (err) {
+      console.warn("[archive] failed:", err instanceof Error ? err.message : err);
     }
   }
 

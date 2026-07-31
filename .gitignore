@@ -2,5 +2,6 @@ node_modules/
 dist/
 .env
 server/.board-workspace/
+server/.board-archive/
 .DS_Store
 .uvc-util/

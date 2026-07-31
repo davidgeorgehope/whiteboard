@@ -27,14 +27,15 @@ const MAX_OUTPUT_WIDTH = 1600;
 // anchored to the darkest ink actually present, so faint pencil/ballpoint
 // survives. Both anchors come from the paper interior only: the warp border
 // carries desk/edge pixels that would otherwise drag the ink anchor far below
-// the real ink and leave faint strokes unstretched.
-const HIST_MARGIN_RATIO = 0.04;
-// Detection rides the dilated outer edge (and any edge shadow), so the locked
-// quad overshoots the physical sheet. Warping a hair inside the corners keeps
-// desk pixels out entirely; otherwise they show as a dark ring and, worse,
-// steal the ink anchor below (desk is far darker than ink, so real strokes
-// stretch to near-white and the white-snap erases them).
-const WARP_INSET_RATIO = 0.02;
+// the real ink and leave faint strokes unstretched. Must comfortably exceed
+// |WARP_INSET_RATIO| so the outset desk band never reaches the histogram.
+const HIST_MARGIN_RATIO = 0.06;
+// Negative = outset. Detection sometimes locks a hair inside the physical
+// sheet (low-contrast edge, shadow) and an inset then slices writing near the
+// paper border - losing real ink is worse than showing a thin band of desk.
+// The desk band is cosmetic only: the contrast anchors come from the interior
+// histogram, which HIST_MARGIN_RATIO keeps clear of this band.
+const WARP_INSET_RATIO = -0.025;
 const INK_PERCENTILE = 0.002;
 const PAPER_PERCENTILE = 0.99;
 // Ink-to-paper span below this is indistinguishable from sensor noise: treat

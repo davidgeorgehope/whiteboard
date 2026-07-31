@@ -29,4 +29,5 @@ The live pane works without an API key; only the AI pane needs one.
 
 - Beautify latency is typically 1–3 minutes for a dense board (transcription + image generation). Set `CURSOR_MODEL` in `.env` to pin a specific (vision-capable) model.
 - Fix the camera and paper in place for best results; hit **Re-detect board** if either moves.
+- Every successful AI render is saved to `server/.board-archive/` (timestamped PNGs), so a session's boards survive after the browser tab closes.
 - Anker C200 users: run `scripts/camera-tune.sh` once after plugging in the camera. It sets manual focus and field of view over UVC (the camera ships with autofocus off and focus parked for conference distance, which blurs an overhead rig), and the camera forgets these on unplug/sleep - `npm run dev` re-applies them automatically. Override with `FOV=95|78|65` (AnkerWork-style presets) or `FOCUS=nnn` if your rig changes.
