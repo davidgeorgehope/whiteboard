@@ -25,6 +25,13 @@ Rules:
 export interface BeautifyResult {
   /** PNG as base64 (no data-url prefix). */
   png: string;
+  /**
+   * Whatever transcription/spec text the agent streamed. Often empty or just
+   * "DONE" when the model keeps its working notes in thinking blocks.
+   */
+  spec: string;
+  /** True when the agent replied SKIP (obstruction/blur) and png is the cached render. */
+  skipped: boolean;
   durationMs: number;
 }
 
@@ -177,14 +184,14 @@ export class Beautifier {
       }
 
       if (/\bSKIP\b/.test(text) && this.lastPng) {
-        return { png: this.lastPng, durationMs: Date.now() - started };
+        return { png: this.lastPng, spec: text, skipped: true, durationMs: Date.now() - started };
       }
 
       const png = await this.readGeneratedImage(outputPath, outputName);
       this.lastError = null;
       this.lastPng = png;
       void this.archive(png);
-      return { png, durationMs: Date.now() - started };
+      return { png, spec: text, skipped: false, durationMs: Date.now() - started };
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
       throw err;

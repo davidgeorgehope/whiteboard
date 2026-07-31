@@ -2,13 +2,21 @@ import path from "node:path";
 import dotenv from "dotenv";
 import express from "express";
 import { Beautifier } from "./beautifier.js";
+import { FigmaSync } from "./figma-sync.js";
 
 dotenv.config({ path: path.resolve(import.meta.dirname, "../../.env") });
 
 const PORT = Number(process.env.PORT ?? 8787);
 const apiKey = process.env.CURSOR_API_KEY ?? "";
+const figmaBoardUrl = process.env.FIGMA_BOARD_URL ?? "";
 
 const beautifier = apiKey ? new Beautifier(apiKey) : null;
+// Figma auth is not an env var: the drawer agent inherits the OAuth session
+// created by `cursor-agent mcp login figma` (see figma-sync.ts).
+const figmaSync =
+  beautifier && figmaBoardUrl
+    ? new FigmaSync(apiKey, figmaBoardUrl, () => beautifier.pickModel())
+    : null;
 
 const app = express();
 app.use(express.json({ limit: "30mb" }));
@@ -19,7 +27,12 @@ app.get("/api/status", async (_req, res) => {
     return;
   }
   const model = beautifier.model ?? (await beautifier.pickModel().catch(() => null));
-  res.json({ hasKey: true, model, lastError: beautifier.lastError });
+  res.json({
+    hasKey: true,
+    model,
+    lastError: beautifier.lastError,
+    figma: figmaSync ? { state: figmaSync.state, lastError: figmaSync.lastError } : null,
+  });
 });
 
 // Fresh board session: drop the cached render so a new page's SKIP fallback
@@ -51,6 +64,10 @@ app.post("/api/beautify", async (req, res) => {
   });
   try {
     const result = await beautifier.beautify(base64, () => gone);
+    // Mirror to FigJam in the background; SKIP passes carry no new content.
+    if (figmaSync && req.body?.figma !== false && !result.skipped) {
+      figmaSync.sync(result.spec, base64);
+    }
     res.json({
       image: `data:image/png;base64,${result.png}`,
       durationMs: result.durationMs,

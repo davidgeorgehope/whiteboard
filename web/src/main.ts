@@ -11,7 +11,7 @@ import {
   inkChangeRatio,
   type Quad,
 } from "./pipeline";
-import { fetchStatus, requestBeautify, requestReset } from "./beautify";
+import { fetchStatus, requestBeautify, requestReset, type ServerStatus } from "./beautify";
 
 // Full 1080p capture: faint thin strokes lose too much contrast when the
 // paper is a small part of a downscaled frame.
@@ -54,6 +54,14 @@ const agentChip = $<HTMLSpanElement>("agentChip");
 const cameraSelect = $<HTMLSelectElement>("cameraSelect");
 const beautifyBtn = $<HTMLButtonElement>("beautifyBtn");
 const autoToggle = $<HTMLInputElement>("autoToggle");
+const figmaLabel = $<HTMLLabelElement>("figmaLabel");
+const figmaToggle = $<HTMLInputElement>("figmaToggle");
+const figmaChip = $<HTMLSpanElement>("figmaChip");
+
+figmaToggle.checked = localStorage.getItem("wb-figma") !== "off";
+figmaToggle.addEventListener("change", () => {
+  localStorage.setItem("wb-figma", figmaToggle.checked ? "on" : "off");
+});
 
 let cv: CV;
 const quadLock = new QuadLock();
@@ -310,13 +318,16 @@ async function triggerBeautify(): Promise<void> {
   currentAbort = new AbortController();
   try {
     lastSentBoard = sampleBoard(liveCanvas);
-    const result = await requestBeautify(snapshotDataUrl(), currentAbort.signal);
+    const result = await requestBeautify(snapshotDataUrl(), currentAbort.signal, figmaToggle.checked);
     const img = new Image();
     img.src = result.image;
     img.alt = "AI whiteboard";
     svgHost.replaceChildren(img);
     aiStatus.textContent = `updated in ${(result.durationMs / 1000).toFixed(1)}s`;
     aiStatus.className = "";
+    // The FigJam sync starts right after a pass; reflect it without waiting
+    // for the 15s status poll.
+    void refreshAgentStatus();
   } catch (err) {
     // A failed pass delivered nothing: forget the "sent" sample so the
     // change gate can't conclude "no changes" over a stale or empty pane.
@@ -380,10 +391,27 @@ async function refreshAgentStatus(): Promise<void> {
       agentChip.className = "chip good";
       agentChip.title = "";
     }
+    updateFigmaChip(status.figma);
   } catch {
     agentUsable = false;
     agentChip.textContent = "agent: server offline";
     agentChip.className = "chip bad";
+  }
+}
+
+function updateFigmaChip(figma: ServerStatus["figma"]): void {
+  const configured = figma !== null;
+  figmaLabel.hidden = !configured;
+  figmaChip.hidden = !configured;
+  if (!figma) return;
+  if (figma.state === "error") {
+    figmaChip.textContent = "figma: error";
+    figmaChip.className = "chip bad";
+    figmaChip.title = figma.lastError ?? "";
+  } else {
+    figmaChip.textContent = `figma: ${figma.state === "syncing" ? "syncing\u2026" : "synced"}`;
+    figmaChip.className = figma.state === "syncing" ? "chip" : "chip good";
+    figmaChip.title = "";
   }
 }
 

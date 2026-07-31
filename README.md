@@ -19,6 +19,20 @@ Open http://localhost:5173, pick your camera, and point it at the paper so all f
 
 The live pane works without an API key; only the AI pane needs one.
 
+### Optional: mirror to FigJam
+
+Set `FIGMA_BOARD_URL` (a `figma.com/board/...` link) in `.env`, then authenticate Figma's official remote MCP server once. It only accepts OAuth from approved clients (personal access tokens are rejected), so the drawer agent reuses Cursor's client:
+
+1. Add the server to `~/.cursor/mcp.json`:
+
+```json
+{ "mcpServers": { "figma": { "url": "https://mcp.figma.com/mcp" } } }
+```
+
+2. From this repo, run `cursor-agent mcp login figma` and approve in the browser (re-run it if it asks to complete authentication). `cursor-agent mcp list` should then show `figma: ready`. Tokens are stored per project, so run it from the repo root.
+
+After each beautify pass a second agent updates a "Paper board" section on the board with native stickies, shapes and connectors. The **FigJam** toolbar toggle turns it off per session; the `figma:` chip shows sync state. Figma's write-to-canvas is beta: no images, and complex boards sync over several tool calls (~1-2 minutes).
+
 ## How it works
 
 - `web/` — Vite + TypeScript frontend. OpenCV.js (vendored at `web/public/opencv.js`) finds the largest 4-sided contour, warps it flat, then each pixel is divided by a blurred background estimate to cancel shadows before a contrast stretch.
