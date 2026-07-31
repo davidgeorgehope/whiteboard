@@ -301,6 +301,133 @@ export function sampleBoard(canvas: HTMLCanvasElement): ImageData {
   return ctx.getImageData(0, 0, w, h);
 }
 
+export interface InkBlob {
+  id: number;
+  /** SVG path data (fill-rule evenodd), integer coords in board units. */
+  d: string;
+  /** Bounding box in board units (BOARD_UNITS wide, height proportional). */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export const BOARD_UNITS = 1500;
+
+function contourToSubpath(cv: CV, contour: any, k: number, epsilon: number): string | null {
+  const approx = new cv.Mat();
+  try {
+    cv.approxPolyDP(contour, approx, epsilon, true);
+    if (approx.rows < 1) return null;
+    const data = approx.data32S as Int32Array;
+    let d = `M ${Math.round(data[0] * k)} ${Math.round(data[1] * k)}`;
+    for (let j = 1; j < approx.rows; j++) {
+      d += ` L ${Math.round(data[j * 2] * k)} ${Math.round(data[j * 2 + 1] * k)}`;
+    }
+    return `${d} Z`;
+  } finally {
+    approx.delete();
+  }
+}
+
+function clusterPath(cv: CV, contours: any[], k: number, epsilon: number): string {
+  const parts: string[] = [];
+  for (const c of contours) {
+    const sub = contourToSubpath(cv, c, k, epsilon);
+    if (sub) parts.push(sub);
+  }
+  return parts.join(" ");
+}
+
+/** Extract filled ink blobs as SVG path data in board-unit coordinates. */
+export function vectorizeInk(cv: CV, canvas: HTMLCanvasElement): InkBlob[] {
+  const src = cv.imread(canvas);
+  const gray = new cv.Mat();
+  const mask = new cv.Mat();
+  const dilated = new cv.Mat();
+  const clusterContours = new cv.MatVector();
+  const clusterHierarchy = new cv.Mat();
+  const detailContours = new cv.MatVector();
+  const detailHierarchy = new cv.Mat();
+  // Word-level clustering: big enough to join the letters of one word, small
+  // enough that text lines, labels and drawings stay separate blobs. Coarser
+  // radii merge text with drawings into unclassifiable mixed blobs.
+  const radius = Math.max(1, Math.round(canvas.width * 0.006));
+  const ksize = radius * 2 + 1;
+  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ksize, ksize));
+  const clusters: { rect: { x: number; y: number; width: number; height: number }; contours: any[] }[] = [];
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.threshold(gray, mask, 150, 255, cv.THRESH_BINARY_INV);
+    cv.dilate(mask, dilated, kernel);
+    cv.findContours(dilated, clusterContours, clusterHierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    for (let i = 0; i < clusterContours.size(); i++) {
+      const c = clusterContours.get(i);
+      try {
+        clusters.push({ rect: cv.boundingRect(c), contours: [] });
+      } finally {
+        c.delete();
+      }
+    }
+
+    cv.findContours(mask, detailContours, detailHierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    for (let i = 0; i < detailContours.size(); i++) {
+      const c = detailContours.get(i);
+      try {
+        if (cv.contourArea(c) < 4) continue;
+        const br = cv.boundingRect(c);
+        const cx = br.x + br.width / 2;
+        const cy = br.y + br.height / 2;
+        const cluster = clusters.find(
+          (cl) =>
+            cx >= cl.rect.x &&
+            cx < cl.rect.x + cl.rect.width &&
+            cy >= cl.rect.y &&
+            cy < cl.rect.y + cl.rect.height,
+        );
+        if (!cluster) continue;
+        // Clone so we can approx at epsilon 1.0 and optionally redo at 3.0.
+        cluster.contours.push(c.clone());
+      } finally {
+        c.delete();
+      }
+    }
+
+    const k = BOARD_UNITS / canvas.width;
+    const blobs: InkBlob[] = [];
+    let id = 0;
+    for (const cluster of clusters) {
+      let d = clusterPath(cv, cluster.contours, k, 1.0);
+      if (!d) continue;
+      if (d.length > 20_000) d = clusterPath(cv, cluster.contours, k, 3.0);
+      if (!d) continue;
+      blobs.push({
+        id: id++,
+        d,
+        x: Math.round(cluster.rect.x * k),
+        y: Math.round(cluster.rect.y * k),
+        w: Math.round(cluster.rect.width * k),
+        h: Math.round(cluster.rect.height * k),
+      });
+    }
+    return blobs;
+  } finally {
+    for (const cluster of clusters) {
+      for (const c of cluster.contours) c.delete();
+    }
+    src.delete();
+    gray.delete();
+    mask.delete();
+    dilated.delete();
+    clusterContours.delete();
+    clusterHierarchy.delete();
+    detailContours.delete();
+    detailHierarchy.delete();
+    kernel.delete();
+  }
+}
+
 /**
  * Fraction of pixels that flip between clearly-ink and clearly-paper.
  * Unlike diffRatio this ignores luminance drift: camera auto-exposure and the

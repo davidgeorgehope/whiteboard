@@ -29,6 +29,26 @@ const FIGJAM_GUIDE = `Rules for use_figma on a FigJam board (the URL is figma.co
 
 export type FigmaSyncState = "idle" | "syncing" | "error";
 
+interface InkBlob {
+  id: number;
+  d: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function formatVectorizedInk(blobs: InkBlob[]): string {
+  if (blobs.length === 0) return "VECTORIZED INK:\n(none)";
+  const lines = ["VECTORIZED INK:"];
+  for (const b of blobs) {
+    lines.push(`#${b.id} bbox x=${b.x} y=${b.y} w=${b.w} h=${b.h}`);
+    lines.push(`d: ${b.d}`);
+  }
+  lines.push("Coordinates are in a 0..1500-wide board space matching the section scale.");
+  return lines.join("\n");
+}
+
 /**
  * Mirrors the paper board onto a FigJam board through Figma's official remote
  * MCP server. One sync runs at a time with a newest-wins policy: a fresh board
@@ -55,8 +75,9 @@ export class FigmaSync {
 
   async pickModel(): Promise<string> {
     if (this.modelId) return this.modelId;
-    if (process.env.CURSOR_MODEL) {
-      this.modelId = process.env.CURSOR_MODEL;
+    const override = process.env.FIGMA_MODEL ?? process.env.CURSOR_MODEL;
+    if (override) {
+      this.modelId = override;
       return this.modelId;
     }
     try {
@@ -79,12 +100,12 @@ export class FigmaSync {
   }
 
   /** Fire-and-forget: errors land in `state`/`lastError`, never on the caller. */
-  sync(pngBase64: string): void {
+  sync(pngBase64: string, blobs: InkBlob[]): void {
     const requestId = ++this.latestRequest;
     this.cancelCurrent?.();
     const task = async () => {
       if (requestId !== this.latestRequest) return;
-      await this.runOnce(pngBase64);
+      await this.runOnce(pngBase64, blobs);
     };
     this.chain = this.chain.then(task, task).then(
       () => {
@@ -103,7 +124,7 @@ export class FigmaSync {
     );
   }
 
-  private async runOnce(pngBase64: string): Promise<void> {
+  private async runOnce(pngBase64: string, blobs: InkBlob[]): Promise<void> {
     const started = Date.now();
     const passId = ++this.passCounter;
     this.state = "syncing";
@@ -115,10 +136,12 @@ Target FigJam board: ${this.boardUrl}
 
 ${FIGJAM_GUIDE}
 
+${formatVectorizedInk(blobs)}
+
 Workflow for this update:
-1. Transcribe the attached snapshot of the paper: read letter by letter and do not substitute words that merely fit the context. Ignore hands, pens and anything that is not ink on the page.
-2. Inspect the board with one read-only use_figma script: find the section named "Paper board" and return its children (ids, types, text). If the section does not exist yet, create it in step 3.
-3. Make that section match the paper: update text on nodes that changed, create what is missing, remove section children that are no longer on the paper. Never touch anything outside the "Paper board" section.
+1. Look at the attached snapshot and classify every blob listed under VECTORIZED INK: handwritten words/labels/headings -> transcribe them (read letter by letter, do not substitute plausible words); curves, doodles, diagrams, and drawings with labels physically attached -> DRAWING; hands, fingers, pens, shadows and smudges (usually at the frame edges) -> IGNORE, do not draw them.
+2. Inspect the board with one read-only use_figma script: find the section named "Paper board" and return its children (ids, types, text). Create the section if missing.
+3. Reconcile the section to match the paper. Text blobs -> native Text/Sticky/ShapeWithText nodes positioned at the blob's bbox (section-relative x,y from the bbox numbers; pick a font size ≈ 0.75 * bbox height for single-line text). DRAWING blobs -> import the exact geometry: figma.createNodeFromSvg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="<x> <y> <w> <h>"><path fill-rule="evenodd" d="<d>"/></svg>'), then set the returned frame's x/y to the bbox position inside the section and resize(w, h). NEVER invent coordinates or shapes: every position comes from a bbox number and every drawing shape comes from the supplied path data verbatim. Remove section children whose blob no longer exists on the paper.
 4. When the section matches, reply with exactly DONE - no summary. If the figma MCP tools are unavailable or fail with an authentication or connection error, reply with FAIL: followed by the exact error text.
 
 This is a live mirror and speed matters: plan once, keep thinking brief, batch each use_figma call up to the ~10-operation limit, and do not re-read the board between writes or run a final verification pass.`;

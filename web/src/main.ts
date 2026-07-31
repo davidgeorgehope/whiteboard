@@ -9,6 +9,8 @@ import {
   QuadLock,
   sampleBoard,
   inkChangeRatio,
+  vectorizeInk,
+  type InkBlob,
   type Quad,
 } from "./pipeline";
 import { fetchStatus, requestSync, type ServerStatus } from "./sync";
@@ -282,7 +284,8 @@ async function triggerSync(): Promise<void> {
   syncStatus.className = "busy";
   try {
     lastSentBoard = sampleBoard(liveCanvas);
-    await requestSync(snapshotDataUrl());
+    const { dataUrl, blobs } = captureSnapshot();
+    await requestSync(dataUrl, blobs);
     syncStatus.textContent = "";
     // The server-side draw starts immediately; reflect it without waiting
     // for the status poll.
@@ -297,7 +300,7 @@ async function triggerSync(): Promise<void> {
   }
 }
 
-function snapshotDataUrl(): string {
+function captureSnapshot(): { dataUrl: string; blobs: InkBlob[] } {
   if (quadLock.locked) {
     // Warp from the native video frame, not the (possibly downscaled)
     // processing canvas, so a 2K+ sensor's extra pixels reach the AI.
@@ -314,12 +317,12 @@ function snapshotDataUrl(): string {
     const src = cv.imread(frame);
     try {
       warpAndClean(cv, src, quad, scratch, false, null, SNAPSHOT_WIDTH);
-      return scratch.toDataURL("image/png");
+      return { dataUrl: scratch.toDataURL("image/png"), blobs: vectorizeInk(cv, scratch) };
     } finally {
       src.delete();
     }
   }
-  return liveCanvas.toDataURL("image/png");
+  return { dataUrl: liveCanvas.toDataURL("image/png"), blobs: vectorizeInk(cv, liveCanvas) };
 }
 
 async function refreshAgentStatus(): Promise<void> {
@@ -393,7 +396,8 @@ cameraSelect.addEventListener("change", async () => {
   }
 });
 
-(window as any).__wbSnapshot = () => snapshotDataUrl();
+(window as any).__wbSnapshot = () => captureSnapshot();
+(window as any).__wbBlobs = () => captureSnapshot().blobs;
 
 init().catch((err) => {
   boardChip.textContent = `init failed: ${err instanceof Error ? err.message : err}`;

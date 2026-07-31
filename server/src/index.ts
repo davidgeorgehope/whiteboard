@@ -43,9 +43,10 @@ app.post("/api/sync", (req, res) => {
     res.status(400).json({ error: "expected { image: dataUrl }" });
     return;
   }
+  const blobs = Array.isArray(req.body?.blobs) ? req.body.blobs : [];
   const base64 = image.replace(/^data:image\/\w+;base64,/, "");
   console.log(`[sync] ${new Date().toLocaleTimeString()} snapshot received`);
-  figmaSync.sync(base64);
+  figmaSync.sync(base64, blobs);
   res.status(202).json({ state: figmaSync.state });
 });
 
