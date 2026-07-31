@@ -28,8 +28,14 @@ const DETECT_EVERY_N_FRAMES = 4;
 const MOTION_THRESHOLD = 0.03;
 // Fraction of downsampled board pixels that must flip between ink and paper
 // (inkChangeRatio) since the last synced board before an auto pass fires.
-// A single short word measures ~0.01; drift-induced edge wobble measures ~0.
-const CHANGE_MIN_RATIO = 0.004;
+// Measured on a real snapshot at GATE_SAMPLE_WIDTH: a single small star
+// (~0.6 inch of thin pen stroke) is ~0.0007, a short word noticeably more,
+// drift-induced edge wobble ~0. Higher thresholds silently swallow small
+// additions: the gate concludes "no changes" and clears the dirty flag.
+const CHANGE_MIN_RATIO = 0.0004;
+// The gate samples at higher resolution than the 160px motion detector:
+// thin strokes average into midtones at 160 wide and miss both ink bands.
+const GATE_SAMPLE_WIDTH = 480;
 // Wait for the pen to be down for a bit before syncing, so lifting the
 // pen mid-word doesn't fire a pass.
 const MOTION_DEBOUNCE_MS = 1600;
@@ -264,7 +270,7 @@ function maybeAutoSync(): void {
   const now = performance.now();
   if (now - lastMotionAt < MOTION_DEBOUNCE_MS) return;
   if (now - lastSyncAt < MIN_SYNC_GAP_MS) return;
-  const sample = sampleBoard(liveCanvas);
+  const sample = sampleBoard(liveCanvas, GATE_SAMPLE_WIDTH);
   const gateRatio = lastSentBoard === null ? null : inkChangeRatio(sample, lastSentBoard);
   (window as any).__wbGateRatio = gateRatio;
   if (gateRatio !== null && gateRatio < CHANGE_MIN_RATIO) {
@@ -283,7 +289,7 @@ async function triggerSync(): Promise<void> {
   syncStatus.textContent = "sending\u2026";
   syncStatus.className = "busy";
   try {
-    lastSentBoard = sampleBoard(liveCanvas);
+    lastSentBoard = sampleBoard(liveCanvas, GATE_SAMPLE_WIDTH);
     const { dataUrl, blobs } = captureSnapshot();
     await requestSync(dataUrl, blobs);
     syncStatus.textContent = "";

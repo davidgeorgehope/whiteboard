@@ -290,8 +290,7 @@ export function warpAndClean(
   }
 }
 
-export function sampleBoard(canvas: HTMLCanvasElement): ImageData {
-  const w = 160;
+export function sampleBoard(canvas: HTMLCanvasElement, w = 160): ImageData {
   const h = Math.max(1, Math.round((canvas.height * w) / canvas.width));
   const scratch = document.createElement("canvas");
   scratch.width = w;
@@ -433,11 +432,15 @@ export function vectorizeInk(cv: CV, canvas: HTMLCanvasElement): InkBlob[] {
  * Unlike diffRatio this ignores luminance drift: camera auto-exposure and the
  * contrast re-anchoring shift stroke edges by tens of levels between samples
  * taken minutes apart, but only genuinely new/erased ink crosses both bands.
+ * The 60-level gap between bands is the drift guard; the cleaned board snaps
+ * paper to near-white, so PAPER=210 stays comfortably safe while INK=150
+ * still catches thin downsampled strokes (a small star's ink lands ~130-150
+ * at a 480-wide sample and would vanish entirely under a 100 cutoff).
  */
 export function inkChangeRatio(a: ImageData, b: ImageData): number {
   if (a.width !== b.width || a.height !== b.height) return 1;
-  const INK = 100;
-  const PAPER = 180;
+  const INK = 150;
+  const PAPER = 210;
   let changed = 0;
   const ad = a.data;
   const bd = b.data;
